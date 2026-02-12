@@ -674,7 +674,7 @@ def main():
     )
     export_parser.add_argument(
         "--llm", choices=["claude", "gemini"],
-        help="LLM で自動変換 (claude または gemini)"
+        help="LLM CLI でカタカナ名を英語正式名に変換し mappings.tsv に出力"
     )
     export_parser.add_argument(
         "--mappings", type=Path, default=DATA_DIR / "mappings.tsv",

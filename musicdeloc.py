@@ -626,7 +626,9 @@ JSON形式のみで出力してください（説明不要）:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Apple Music のアーティスト名を MusicBrainz 正式名に変換"
+        description="Apple Music のアーティスト名を MusicBrainz 正式名に変換",
+        epilog="サブコマンド省略時: scan → fetch → LLM変換(--llm指定時) → import を実行",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "-y", "--yes", action="store_true",
@@ -702,20 +704,26 @@ def main():
     app = MusicDeLoc()
 
     if args.command is None:
-        # デフォルト: 非対話で一括処理
+        # デフォルト: データ準備のみ（apply は別途実行）
         app.scan(show_all=False)
-        candidates = app.fetch(interactive=False)
+        app.fetch(interactive=False)
 
-        # 見つからないアーティストを自動出力
+        # 見つからないアーティストを処理
         not_found = app.cache.get_not_found()
         if not_found:
             output_path = DATA_DIR / "not_found.tsv"
             app.export_not_found(output_path, llm=args.llm)
-            if not args.llm:
-                print(f"→ Gemini/Claude で変換後、import-mappings でインポートしてください\n")
 
-        if candidates:
-            app.apply(candidates, auto_confirm=args.yes)
+            # LLM変換後は自動でインポート
+            if args.llm:
+                mappings_path = DATA_DIR / "mappings.tsv"
+                if mappings_path.exists():
+                    app.import_mappings(mappings_path)
+
+        # 変換候補があれば案内
+        conversions = app.cache.get_conversions()
+        if conversions:
+            print(f"\n→ 変換候補 {len(conversions)} 件。適用: python3 musicdeloc.py apply -y")
 
     elif args.command == "scan":
         app.scan(show_all=args.all)

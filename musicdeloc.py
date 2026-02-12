@@ -424,14 +424,16 @@ class MusicDeLoc:
         return restored
 
     def export_not_found(
-        self, output_path: Path, llm: Optional[str] = None, mappings_path: Optional[Path] = None
+        self, output_path: Path, llm: Optional[str] = None, mappings_path: Optional[Path] = None,
+        batch_size: int = 100
     ) -> int:
-        """見つからなかったアーティストを JSON ファイルに出力
+        """見つからなかったアーティストを TSV ファイルに出力
 
         Args:
-            output_path: 出力ファイルパス
+            output_path: 出力ファイルパス（1行1アーティスト）
             llm: LLM CLI を使用して変換 ("claude" or "gemini")
-            mappings_path: LLM 出力先 (デフォルト: mappings.json)
+            mappings_path: LLM 出力先 (デフォルト: mappings.tsv)
+            batch_size: LLM 処理時のバッチサイズ (デフォルト: 100)
 
         Returns:
             出力した件数
@@ -442,30 +444,71 @@ class MusicDeLoc:
             return 0
 
         with open(output_path, "w", encoding="utf-8") as f:
-            json.dump(not_found, f, ensure_ascii=False, indent=2)
+            f.write("\n".join(not_found) + "\n")
 
         print(f"{len(not_found)} 件を {output_path} に出力しました。")
 
         # LLM で変換
         if llm:
             if mappings_path is None:
-                mappings_path = DATA_DIR / "mappings.json"
-            self._translate_with_llm(not_found, llm, mappings_path)
+                mappings_path = DATA_DIR / "mappings.tsv"
+            self._translate_with_llm(not_found, llm, mappings_path, batch_size)
 
         return len(not_found)
 
     def _translate_with_llm(
-        self, artists: list[str], llm: str, output_path: Path
+        self, artists: list[str], llm: str, output_path: Path, batch_size: int = 100
     ) -> bool:
-        """LLM CLI を使用してアーティスト名を変換
+        """LLM CLI を使用してアーティスト名を変換（バッチ処理）
 
         Args:
             artists: アーティスト名リスト
             llm: LLM CLI ("claude" or "gemini")
             output_path: 出力先パス
+            batch_size: バッチサイズ (デフォルト: 100)
 
         Returns:
             成功した場合 True
+        """
+        total_batches = (len(artists) - 1) // batch_size + 1
+        print(f"\n{llm} で変換中... ({len(artists)} 件を {total_batches} バッチに分割)")
+
+        all_mappings = {}
+
+        for i in range(0, len(artists), batch_size):
+            batch = artists[i:i + batch_size]
+            batch_num = i // batch_size + 1
+            print(f"  バッチ {batch_num}/{total_batches} ({len(batch)} 件)...", end=" ", flush=True)
+
+            result = self._call_llm_batch(batch, llm)
+            if result:
+                all_mappings.update(result)
+                print(f"✓ {len(result)} 件")
+            else:
+                print("✗ 失敗")
+
+        if not all_mappings:
+            print("エラー: すべてのバッチが失敗しました")
+            return False
+
+        # 結果をTSV形式で保存
+        with open(output_path, "w", encoding="utf-8") as f:
+            for original, converted in all_mappings.items():
+                f.write(f"{original}\t{converted}\n")
+
+        print(f"→ {len(all_mappings)} 件を {output_path} に保存しました")
+        print(f"→ 次のコマンドでインポート: python3 musicdeloc.py import-mappings {output_path}")
+        return True
+
+    def _call_llm_batch(self, artists: list[str], llm: str) -> Optional[dict]:
+        """単一バッチを LLM で処理
+
+        Args:
+            artists: アーティスト名リスト（バッチ）
+            llm: LLM CLI ("claude" or "gemini")
+
+        Returns:
+            マッピング辞書、失敗時は None
         """
         prompt = f"""以下のアーティスト名を正式名に変換してください。
 
@@ -485,8 +528,6 @@ JSON形式のみで出力してください（説明不要）:
 {json.dumps(artists, ensure_ascii=False, indent=2)}
 """
 
-        print(f"\n{llm} で変換中...")
-
         try:
             if llm == "claude":
                 result = subprocess.run(
@@ -503,38 +544,19 @@ JSON形式のみで出力してください（説明不要）:
                     timeout=300,
                 )
             else:
-                print(f"エラー: 未対応の LLM: {llm}")
-                return False
+                return None
 
             if result.returncode != 0:
-                print(f"エラー: {llm} の実行に失敗しました")
-                if result.stderr:
-                    print(result.stderr)
-                return False
+                return None
 
             # JSON を抽出
             output = result.stdout.strip()
-            mappings = self._extract_json(output)
-
-            if mappings is None:
-                print("エラー: JSON の解析に失敗しました")
-                print(f"出力:\n{output[:500]}...")
-                return False
-
-            # 保存
-            with open(output_path, "w", encoding="utf-8") as f:
-                json.dump(mappings, f, ensure_ascii=False, indent=2)
-
-            print(f"→ {len(mappings)} 件を {output_path} に保存しました")
-            print(f"→ 次のコマンドでインポート: python3 musicdeloc.py import-mappings {output_path}")
-            return True
+            return self._extract_json(output)
 
         except subprocess.TimeoutExpired:
-            print(f"エラー: {llm} がタイムアウトしました")
-            return False
+            return None
         except FileNotFoundError:
-            print(f"エラー: {llm} コマンドが見つかりません")
-            return False
+            return None
 
     def _extract_json(self, text: str) -> Optional[dict]:
         """テキストから JSON を抽出"""
@@ -565,10 +587,10 @@ JSON形式のみで出力してください（説明不要）:
         return None
 
     def import_mappings(self, input_path: Path) -> int:
-        """JSON マッピングファイルをキャッシュにインポート
+        """TSV マッピングファイルをキャッシュにインポート
 
         Args:
-            input_path: マッピングファイル ({"日本語名": "英語名", ...})
+            input_path: マッピングファイル（タブ区切り: 元の名前 → 正式名）
 
         Returns:
             インポートした件数
@@ -577,19 +599,26 @@ JSON形式のみで出力してください（説明不要）:
             print(f"エラー: ファイルが見つかりません: {input_path}")
             return 0
 
+        mappings: dict[str, str] = {}
         with open(input_path, "r", encoding="utf-8") as f:
-            mappings = json.load(f)
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split("\t")
+                if len(parts) >= 2:
+                    mappings[parts[0]] = parts[1]
 
-        if not isinstance(mappings, dict):
-            print("エラー: ファイル形式が不正です。{\"日本語名\": \"英語名\", ...} の形式が必要です。")
+        if not mappings:
+            print("エラー: インポートするデータがありません。")
             return 0
 
         imported = 0
-        for jp_name, en_name in mappings.items():
-            if jp_name and en_name:
-                self.cache.set_manual(jp_name, en_name)
+        for original, converted in mappings.items():
+            if original and converted:
+                self.cache.set_manual(original, converted)
                 imported += 1
-                print(f"  {jp_name} → {en_name}")
+                print(f"  {original} → {converted}")
 
         print(f"\n{imported} 件をインポートしました。")
         return imported
@@ -637,19 +666,23 @@ def main():
 
     # export-not-found
     export_parser = subparsers.add_parser(
-        "export-not-found", help="見つからないアーティストを JSON 出力"
+        "export-not-found", help="見つからないアーティストを TSV 出力"
     )
     export_parser.add_argument(
-        "-o", "--output", type=Path, default=DATA_DIR / "not_found.json",
-        help=f"出力ファイル (デフォルト: {DATA_DIR}/not_found.json)"
+        "-o", "--output", type=Path, default=DATA_DIR / "not_found.tsv",
+        help=f"出力ファイル (デフォルト: {DATA_DIR}/not_found.tsv)"
     )
     export_parser.add_argument(
         "--llm", choices=["claude", "gemini"],
         help="LLM で自動変換 (claude または gemini)"
     )
     export_parser.add_argument(
-        "--mappings", type=Path, default=DATA_DIR / "mappings.json",
-        help=f"LLM 出力先 (デフォルト: {DATA_DIR}/mappings.json)"
+        "--mappings", type=Path, default=DATA_DIR / "mappings.tsv",
+        help=f"LLM 出力先 (デフォルト: {DATA_DIR}/mappings.tsv)"
+    )
+    export_parser.add_argument(
+        "--batch-size", type=int, default=100,
+        help="LLM 処理時のバッチサイズ (デフォルト: 100)"
     )
 
     # import-mappings
@@ -657,7 +690,7 @@ def main():
         "import-mappings", help="変換マッピングをインポート"
     )
     import_parser.add_argument(
-        "input_file", type=Path, help="マッピングファイル (JSON)"
+        "input_file", type=Path, help="マッピングファイル (TSV)"
     )
 
     args = parser.parse_args()
@@ -672,7 +705,7 @@ def main():
         # 見つからないアーティストを自動出力
         not_found = app.cache.get_not_found()
         if not_found:
-            output_path = DATA_DIR / "not_found.json"
+            output_path = DATA_DIR / "not_found.tsv"
             app.export_not_found(output_path)
             print(f"→ Gemini/Claude で変換後、import-mappings でインポートしてください\n")
 
@@ -728,7 +761,8 @@ def main():
         app.export_not_found(
             args.output,
             llm=getattr(args, 'llm', None),
-            mappings_path=getattr(args, 'mappings', None)
+            mappings_path=getattr(args, 'mappings', None),
+            batch_size=getattr(args, 'batch_size', 100)
         )
 
     elif args.command == "import-mappings":

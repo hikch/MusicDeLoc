@@ -632,6 +632,10 @@ def main():
         "-y", "--yes", action="store_true",
         help="確認プロンプトをスキップ"
     )
+    parser.add_argument(
+        "--llm", choices=["claude", "gemini"],
+        help="LLM CLI でカタカナ名を英語正式名に変換"
+    )
     subparsers = parser.add_subparsers(dest="command", help="コマンド")
 
     # scan
@@ -706,8 +710,9 @@ def main():
         not_found = app.cache.get_not_found()
         if not_found:
             output_path = DATA_DIR / "not_found.tsv"
-            app.export_not_found(output_path)
-            print(f"→ Gemini/Claude で変換後、import-mappings でインポートしてください\n")
+            app.export_not_found(output_path, llm=args.llm)
+            if not args.llm:
+                print(f"→ Gemini/Claude で変換後、import-mappings でインポートしてください\n")
 
         if candidates:
             app.apply(candidates, auto_confirm=args.yes)
